@@ -1,0 +1,45 @@
+name: Nexo Tunnel Agent
+version: "0.1.0"
+slug: nexo_tunnel_agent
+description: Agente Python para conectar Home Assistant con Nexo mediante túnel inverso y QR de vinculación.
+startup: services
+boot: auto
+init: false
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+hassio_api: true
+homeassistant_api: true
+panel_icon: mdi:lan-connect
+panel_title: Nexo Tunnel
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Interfaz local de vinculación y QR
+webui: http://[HOST]:[PORT:8099]
+options:
+  backend_url: https://addon-ha.gngcreate.com
+  frontend_pairing_url: https://nexo.gngcreate.com/homes/new
+  home_id: ""
+  agent_token: ""
+  suggested_name: Home Assistant
+  ha_base_url: http://supervisor/core
+  ha_access_token: ""
+  use_supervisor_token: true
+  reconnect_delay_seconds: 5
+  heartbeat_interval_seconds: 20
+schema:
+  backend_url: str
+  frontend_pairing_url: str
+  home_id: str?
+  agent_token: password?
+  suggested_name: str?
+  ha_base_url: str
+  ha_access_token: password?
+  use_supervisor_token: bool
+  reconnect_delay_seconds: int(2,60)
+  heartbeat_interval_seconds: int(10,120)
+
