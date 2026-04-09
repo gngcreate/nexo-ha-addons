@@ -1,5 +1,5 @@
 name: Nexo Tunnel Agent
-version: "0.1.4"
+version: "0.1.5"
 slug: nexo_tunnel_agent
 description: Agente Python para conectar Home Assistant con Nexo mediante túnel inverso y QR de vinculación.
 startup: services
@@ -15,6 +15,8 @@ hassio_api: true
 homeassistant_api: true
 panel_icon: mdi:lan-connect
 panel_title: Nexo Tunnel
+ingress: true
+ingress_port: 8099
 ports:
   8099/tcp: 8099
 ports_description:

@@ -112,6 +112,36 @@ class NexoTunnelAgent:
             "usesSupervisorToken": bool(self.resolve_ha_token(source_only=True) == "supervisor"),
         }
 
+    async def push_ha_sensor(self) -> None:
+        """Publica el estado del túnel como sensor en Home Assistant."""
+        supervisor_token = os.getenv("SUPERVISOR_TOKEN", "")
+        if not supervisor_token or not self.http_session:
+            return
+        attributes = {
+            "friendly_name": "Nexo Tunnel",
+            "home_id": self.config.pairing_state.home_id,
+            "suggested_name": self.config.pairing_state.suggested_name,
+            "backend_url": self.config.backend_url,
+            "last_error": self.last_error or "Ninguno",
+            "icon": "mdi:lan-connect" if self.connected else "mdi:lan-disconnect",
+        }
+        try:
+            async with self.http_session.post(
+                "http://supervisor/core/api/states/binary_sensor.nexo_tunnel_connected",
+                headers={"Authorization": f"Bearer {supervisor_token}", "Content-Type": "application/json"},
+                json={"state": "on" if self.connected else "off", "attributes": attributes},
+            ) as resp:
+                if resp.status not in (200, 201):
+                    LOGGER.debug("Sensor push respondió con status %s", resp.status)
+        except Exception as exc:
+            LOGGER.debug("No se pudo publicar el sensor en HA: %s", exc)
+
+    async def ha_sensor_loop(self) -> None:
+        """Actualiza el sensor de HA periódicamente."""
+        while not self.stop_event.is_set():
+            await self.push_ha_sensor()
+            await asyncio.sleep(self.config.heartbeat_interval_seconds)
+
     async def start(self) -> None:
         timeout = aiohttp.ClientTimeout(total=90)
         self.http_session = aiohttp.ClientSession(timeout=timeout)
@@ -123,6 +153,7 @@ class NexoTunnelAgent:
         LOGGER.info("Pairing UI listening on port %s", WEB_PORT)
 
         self.websocket_task = asyncio.create_task(self.tunnel_loop(), name="nexo-tunnel-loop")
+        asyncio.create_task(self.ha_sensor_loop(), name="nexo-ha-sensor")
 
     async def stop(self) -> None:
         self.stop_event.set()
@@ -309,14 +340,17 @@ class NexoTunnelAgent:
 
     async def handle_index(self, request: web.Request) -> web.Response:
         status = self.current_status()
+        ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
+        base_href = f"{ingress_path}/" if ingress_path else "/"
         tunnel_class = "status-ok" if status["connected"] else "status-ko"
         tunnel_text = "Conectado" if status["connected"] else "Desconectado"
         last_error = status["lastError"] or "Sin errores"
         html = f"""<!doctype html>
 <html lang="es">
-  <head>
+    <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <base href="{base_href}" />
     <title>Nexo Tunnel Agent</title>
     <style>
       body {{ font-family: system-ui, sans-serif; background: #020617; color: #e2e8f0; margin: 0; padding: 24px; }}
@@ -375,7 +409,7 @@ class NexoTunnelAgent:
         </section>
 
         <section class="card">
-          <img alt="QR de vinculación" src="/qr" />
+          <img alt="QR de vinculación" src="qr" />
           <p class="label" style="margin-top:16px">URL de vinculación</p>
           <code id="pairing-url">{status['pairingUrl']}</code>
           <p style="margin-top:12px;font-size:12px;color:#94a3b8">
@@ -386,7 +420,7 @@ class NexoTunnelAgent:
 
       <section class="card">
         <p class="label">Estado JSON en tiempo real</p>
-        <a href="/api/status" style="font-size:13px">/api/status</a>
+        <a href="api/status" style="font-size:13px">/api/status</a>
         <p style="margin-top:12px;font-size:13px;color:#94a3b8">Esta página se actualiza cada 8 segundos.</p>
       </section>
     </div>
@@ -394,7 +428,7 @@ class NexoTunnelAgent:
     <script>
       async function refresh() {{
         try {{
-          const r = await fetch('/api/status');
+          const r = await fetch('api/status');
           if (!r.ok) return;
           const s = await r.json();
 
