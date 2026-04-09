@@ -57,6 +57,7 @@ class NexoTunnelAgent:
         self.http_runner: web.AppRunner | None = None
         self.http_session: aiohttp.ClientSession | None = None
         self.websocket_task: asyncio.Task[None] | None = None
+        self._warned_missing_ha_token = False
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_get("/qr", self.handle_qr)
         self.app.router.add_get("/api/status", self.handle_status)
@@ -279,7 +280,7 @@ class NexoTunnelAgent:
             raise RuntimeError("HTTP session not initialized")
 
         upstream_url = self.build_home_assistant_url(path)
-        request_headers = self.build_forward_headers(headers)
+        request_headers, auth_source = self.build_forward_headers(headers)
         request_kwargs: dict[str, Any] = {}
 
         if body is not None:
@@ -292,6 +293,34 @@ class NexoTunnelAgent:
 
         async with self.http_session.request(method.upper(), upstream_url, headers=request_headers, **request_kwargs) as response:
             payload = await self.parse_response_body(response)
+            if response.status != 401:
+                return response.status, payload
+
+            retry_headers, retry_source = self.build_forward_headers(headers, preferred_source=self.alternate_auth_source(auth_source))
+            if retry_source and retry_source != auth_source:
+                LOGGER.warning(
+                    "Home Assistant respondió 401 para %s %s usando token '%s'; reintentando con '%s'",
+                    method.upper(),
+                    path,
+                    auth_source or "none",
+                    retry_source,
+                )
+                async with self.http_session.request(
+                    method.upper(),
+                    upstream_url,
+                    headers=retry_headers,
+                    **request_kwargs,
+                ) as retry_response:
+                    retry_payload = await self.parse_response_body(retry_response)
+                    return retry_response.status, retry_payload
+
+            LOGGER.warning(
+                "Home Assistant respondió 401 para %s %s con token '%s' y base '%s'",
+                method.upper(),
+                path,
+                auth_source or "none",
+                self.config.ha_base_url,
+            )
             return response.status, payload
 
     def build_home_assistant_url(self, path: str) -> str:
@@ -299,7 +328,11 @@ class NexoTunnelAgent:
         base = self.config.ha_base_url.rstrip("/")
         return f"{base}{normalized_path}"
 
-    def build_forward_headers(self, headers: dict[str, Any]) -> dict[str, str]:
+    def build_forward_headers(
+        self,
+        headers: dict[str, Any],
+        preferred_source: str | None = None,
+    ) -> tuple[dict[str, str], str]:
         blacklist = {"host", "connection", "content-length", "authorization"}
         forwarded = {
             str(key): str(value)
@@ -307,22 +340,52 @@ class NexoTunnelAgent:
             if str(key).lower() not in blacklist and value is not None
         }
 
-        token = self.resolve_ha_token()
+        token, source = self.resolve_ha_token_pair(preferred_source=preferred_source)
         if token:
             forwarded["Authorization"] = f"Bearer {token}"
+            # Mejora compatibilidad al usar el proxy del Supervisor.
+            if source == "supervisor":
+                forwarded["X-Supervisor-Token"] = token
+        elif not self._warned_missing_ha_token:
+            self._warned_missing_ha_token = True
+            LOGGER.warning(
+                "No hay token configurado para Home Assistant. Configura ha_access_token o habilita use_supervisor_token con SUPERVISOR_TOKEN disponible."
+            )
 
         if "Accept" not in forwarded:
             forwarded["Accept"] = "application/json"
 
-        return forwarded
+        return forwarded, source
+
+    @staticmethod
+    def alternate_auth_source(source: str) -> str | None:
+        if source == "supervisor":
+            return "manual"
+        if source == "manual":
+            return "supervisor"
+        return None
+
+    def resolve_ha_token_pair(self, preferred_source: str | None = None) -> tuple[str, str]:
+        supervisor_token = os.getenv("SUPERVISOR_TOKEN", "")
+        manual_token = self.config.ha_access_token
+
+        order: list[str]
+        if preferred_source in {"supervisor", "manual"}:
+            order = [preferred_source, "manual" if preferred_source == "supervisor" else "supervisor"]
+        else:
+            order = ["supervisor", "manual"] if self.config.use_supervisor_token else ["manual", "supervisor"]
+
+        for source in order:
+            if source == "supervisor" and self.config.use_supervisor_token and supervisor_token:
+                return supervisor_token, "supervisor"
+            if source == "manual" and manual_token:
+                return manual_token, "manual"
+
+        return "", ""
 
     def resolve_ha_token(self, source_only: bool = False) -> str:
-        supervisor_token = os.getenv("SUPERVISOR_TOKEN", "")
-        if self.config.use_supervisor_token and supervisor_token:
-            return "supervisor" if source_only else supervisor_token
-        if self.config.ha_access_token:
-            return "manual" if source_only else self.config.ha_access_token
-        return ""
+        token, source = self.resolve_ha_token_pair()
+        return source if source_only else token
 
     async def parse_response_body(self, response: aiohttp.ClientResponse) -> Any:
         raw = await response.read()
