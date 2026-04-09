@@ -9,8 +9,8 @@ WORKDIR /opt/nexo-agent
 COPY requirements.txt /tmp/requirements.txt
 RUN if ! command -v python3 >/dev/null 2>&1 || ! command -v pip >/dev/null 2>&1; then \
       apk add --no-cache python3 py3-pip; \
-    fi \
- && python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
+    fi && \
+    python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY rootfs /
 COPY run.sh /run.sh
