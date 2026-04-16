@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-python:3.12-alpine3.20
+ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 ENV LANG=C.UTF-8 \
@@ -6,16 +6,16 @@ ENV LANG=C.UTF-8 \
 
 WORKDIR /opt/nexo-agent
 
-# Dependencias para compilar aiohttp/websockets en arquitecturas sin wheel.
+# Dependencias para compilar paquetes Python en arquitecturas sin wheel.
 RUN apk add --no-cache --virtual .build-deps \
-    gcc \
-    musl-dev \
+    build-base \
     python3-dev \
     libffi-dev \
     openssl-dev
 
 COPY requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir --prefer-binary -r /tmp/requirements.txt \
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip3 install --no-cache-dir --prefer-binary -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt \
     && apk del .build-deps
 
