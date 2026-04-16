@@ -15,6 +15,7 @@ from urllib.parse import urlencode, urlparse
 
 import aiohttp
 import qrcode
+import qrcode.image.svg
 import websockets
 from aiohttp import web
 from websockets.exceptions import ConnectionClosed
@@ -524,10 +525,10 @@ class NexoTunnelAgent:
         return web.Response(text=html, content_type="text/html")
 
     async def handle_qr(self, request: web.Request) -> web.Response:
-        image = qrcode.make(self.pairing_url)
+        image = qrcode.make(self.pairing_url, image_factory=qrcode.image.svg.SvgPathImage)
         buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        return web.Response(body=buffer.getvalue(), content_type="image/png")
+        image.save(buffer)
+        return web.Response(body=buffer.getvalue(), content_type="image/svg+xml")
 
     async def handle_status(self, request: web.Request) -> web.Response:
         return web.json_response(self.current_status())
