@@ -59,11 +59,19 @@ class NexoTunnelAgent:
         self.http_session: aiohttp.ClientSession | None = None
         self.websocket_task: asyncio.Task[None] | None = None
         self._warned_missing_ha_token = False
+        
+        # Sincronización de estados
+        self.ha_ws_id_counter = 1
+        self.ha_entities: dict[str, dict[str, Any]] = {}  # entity_id -> full state
+        self.ha_subscription_id: int | None = None
+        self.backend_ws: websockets.ClientConnection | None = None
+        
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_get("/qr", self.handle_qr)
         self.app.router.add_get("/api/status", self.handle_status)
         self.app.router.add_post("/api/backend-url", self.handle_update_backend_url)
         self.app.router.add_get("/health", self.handle_health)
+        self.app.router.add_get("/api/entities", self.handle_get_entities)
 
     @property
     def pairing_url(self) -> str:
@@ -157,6 +165,7 @@ class NexoTunnelAgent:
 
         self.websocket_task = asyncio.create_task(self.tunnel_loop(), name="nexo-tunnel-loop")
         asyncio.create_task(self.ha_sensor_loop(), name="nexo-ha-sensor")
+        asyncio.create_task(self.ha_state_sync_loop(), name="nexo-ha-state-sync")
 
     async def stop(self) -> None:
         self.stop_event.set()
@@ -220,6 +229,7 @@ class NexoTunnelAgent:
                 self.connected_since = None
 
     async def consume_messages(self, websocket: websockets.ClientConnection) -> None:
+        self.backend_ws = websocket  # Guardar referencia para enviar updates
         async for raw_message in websocket:
             try:
                 message = json.loads(raw_message)
@@ -241,6 +251,52 @@ class NexoTunnelAgent:
             await websocket.send(json.dumps(payload))
             self.last_heartbeat_ts = time.time()
             await asyncio.sleep(self.config.heartbeat_interval_seconds)
+
+    async def ha_state_sync_loop(self) -> None:
+        """Sincroniza estados de Home Assistant continuamente."""
+        while not self.stop_event.is_set():
+            try:
+                await self.sync_ha_states()
+            except Exception as exc:
+                LOGGER.debug("Error sincronizando estados HA: %s", exc)
+            await asyncio.sleep(5)  # Intenta cada 5 segundos
+
+    async def sync_ha_states(self) -> None:
+        """Obtiene lista de entities y se suscribe a cambios."""
+        if not self.http_session:
+            return
+        
+        try:
+            # Obtener lista de entities usando REST API
+            url = self.build_home_assistant_url("/api/states")
+            request_headers, _ = self.build_forward_headers({})
+            
+            async with self.http_session.get(url, headers=request_headers) as resp:
+                if resp.status == 200:
+                    states = await resp.json()
+                    # Filtrar solo las entities controlables
+                    controllable_domains = {
+                        'light', 'switch', 'input_boolean', 'climate', 
+                        'cover', 'fan', 'media_player', 'lock', 'binary_sensor', 'sensor'
+                    }
+                    
+                    for state_dict in states:
+                        entity_id = state_dict.get('entity_id', '')
+                        domain = entity_id.split('.')[0] if '.' in entity_id else ''
+                        
+                        if domain in controllable_domains:
+                            self.ha_entities[entity_id] = state_dict
+                    
+                    # Enviar lista al backend si está conectado
+                    if self.backend_ws and self.connected:
+                        payload = {
+                            "type": "entities_state",
+                            "entities": self.ha_entities,
+                        }
+                        await self.backend_ws.send(json.dumps(payload))
+                        LOGGER.debug("Enviadas %d entities al backend", len(self.ha_entities))
+        except Exception as exc:
+            LOGGER.debug("Error obteniendo estados HA: %s", exc)
 
     async def handle_proxy_command(self, websocket: websockets.ClientConnection, message: dict[str, Any]) -> None:
         request_id = str(message.get("requestId") or "")
@@ -612,6 +668,14 @@ class NexoTunnelAgent:
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", **self.current_status()})
+
+    async def handle_get_entities(self, request: web.Request) -> web.Response:
+        """Devuelve la lista de entities (dispositivos) disponibles en HA."""
+        return web.json_response({
+            "entities": self.ha_entities,
+            "count": len(self.ha_entities),
+            "lastSync": time.time()
+        })
 
     @staticmethod
     def _looks_like_placeholder(value: str) -> bool:
