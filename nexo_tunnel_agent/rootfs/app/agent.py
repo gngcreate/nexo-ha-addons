@@ -62,6 +62,7 @@ class NexoTunnelAgent:
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_get("/qr", self.handle_qr)
         self.app.router.add_get("/api/status", self.handle_status)
+        self.app.router.add_post("/api/backend-url", self.handle_update_backend_url)
         self.app.router.add_get("/health", self.handle_health)
 
     @property
@@ -487,6 +488,17 @@ class NexoTunnelAgent:
         <a href="api/status" style="font-size:13px">/api/status</a>
         <p style="margin-top:12px;font-size:13px;color:#94a3b8">Esta página se actualiza cada 8 segundos.</p>
       </section>
+
+            <section class="card">
+                <p class="label">Configuración de backend</p>
+                <p style="margin-top:8px;font-size:13px;color:#94a3b8">
+                    Para pruebas locales, no uses localhost. Usa la IP del equipo donde corre el backend, por ejemplo: <b>http://192.168.1.15:5001</b>
+                </p>
+                <label class="label" for="backend-url-input">backend_url</label>
+                <input id="backend-url-input" type="text" style="width:100%;padding:10px;border-radius:10px;border:1px solid #1e293b;background:#020617;color:#e2e8f0" />
+                <button onclick="saveBackendUrl()" style="margin-top:12px;padding:10px 14px;border:none;border-radius:10px;background:#0ea5e9;color:white;cursor:pointer">Guardar backend_url</button>
+                <p id="backend-url-result" style="margin-top:10px;font-size:13px;color:#94a3b8"></p>
+            </section>
     </div>
 
     <script>
@@ -512,10 +524,47 @@ class NexoTunnelAgent:
               pairingEl.innerHTML = '<div class="not-paired">Escanea el QR para registrar esta Home en Nexo.</div>';
             }}
           }}
+
+                    const backendInput = document.getElementById('backend-url-input');
+                    if (backendInput && document.activeElement !== backendInput) {{
+                        backendInput.value = s.backendUrl || '';
+                    }}
         }} catch (e) {{
           console.warn('Status poll failed', e);
         }}
       }}
+
+            async function saveBackendUrl() {{
+                const result = document.getElementById('backend-url-result');
+                const input = document.getElementById('backend-url-input');
+                const backendUrl = (input?.value || '').trim();
+
+                if (!backendUrl) {{
+                    result.textContent = 'Introduce una URL válida.';
+                    result.style.color = '#fb7185';
+                    return;
+                }}
+
+                try {{
+                    const response = await fetch('api/backend-url', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ backend_url: backendUrl }}),
+                    }});
+
+                    const payload = await response.json();
+                    if (!response.ok) {{
+                        throw new Error(payload.error || 'No se pudo guardar backend_url');
+                    }}
+
+                    result.textContent = `Guardado: ${{payload.backend_url}}. Reconectando túnel...`;
+                    result.style.color = '#34d399';
+                    await refresh();
+                }} catch (err) {{
+                    result.textContent = `Error: ${{err}}`;
+                    result.style.color = '#fb7185';
+                }}
+            }}
 
       refresh();
       setInterval(refresh, 8000);
@@ -532,6 +581,34 @@ class NexoTunnelAgent:
 
     async def handle_status(self, request: web.Request) -> web.Response:
         return web.json_response(self.current_status())
+
+    async def handle_update_backend_url(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "JSON inválido"}, status=400)
+
+        backend_url = str(payload.get("backend_url") or "").strip()
+        parsed = urlparse(backend_url)
+        if parsed.scheme not in {"http", "https", "ws", "wss"} or not parsed.netloc:
+            return web.json_response({"error": "backend_url inválida"}, status=400)
+
+        options = load_json(OPTIONS_PATH)
+        options["backend_url"] = backend_url
+        OPTIONS_PATH.write_text(json.dumps(options, indent=2), encoding="utf-8")
+
+        self.config.backend_url = backend_url
+        self.connected = False
+        self.connected_since = None
+        self.last_error = ""
+
+        if self.websocket_task:
+            self.websocket_task.cancel()
+            with contextlib_suppress(asyncio.CancelledError):
+                await self.websocket_task
+
+        self.websocket_task = asyncio.create_task(self.tunnel_loop(), name="nexo-tunnel-loop")
+        return web.json_response({"status": "ok", "backend_url": backend_url})
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", **self.current_status()})
